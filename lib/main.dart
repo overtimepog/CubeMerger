@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'dart:math';
 
+extension IntegerExtensions on int {
+  bool get isPowerOfTwo => this > 0 && (this & (this - 1)) == 0;
+}
+
 void main() => runApp(const CubesControlApp());
 
 class CubesControlApp extends StatelessWidget {
@@ -28,32 +32,45 @@ class GameScreen extends StatefulWidget {
 
 class GameScreenState extends State<GameScreen>
     with SingleTickerProviderStateMixin {
-  final int gridSize = 4;
-  final Random random = Random();
+  /// Current level number
+  int currentLevel = 1;
 
-  /// The grid holds integers for cube values (e.g., 2, 4, 8, etc.) or null if empty
+  /// Get the current grid size based on level
+  int get currentGridSize {
+    if (currentLevel >= 100) return 10;
+    if (currentLevel >= 25) return 7;
+    return 5;
+  }
+
+  /// The grid holds integers for cube values
   late List<List<int?>> grid;
 
-  /// A parallel 2D list that marks which cells are obstacles (true = obstacle)
+  /// Marks cells that are obstacles
   late List<List<bool>> obstacles;
 
-  /// Track how many moves the player has made
-  int moveCount = 0;
+  /// Track start positions for animations
+  late List<List<Offset>> startPositions;
 
-  /// Maximum stars the player can earn in a level
+  /// Track end positions for animations
+  late List<List<Offset>> endPositions;
+
+  int moveCount = 0;
   final int maxStars = 3;
 
   /// Animation controller for cube movements
   late AnimationController _controller;
 
-  /// Slide animation for cube movements
-  late Animation<Offset> _slideAnimation;
-
   /// Track which cells are moving for animation
   late List<List<bool>> isMoving;
 
-  /// Track the distance each cube needs to move
-  late List<List<Offset>> moveDistances;
+  /// Track if we're in the middle of a merge animation
+  bool isAnimating = false;
+
+  /// Queue of merge animations to play
+  List<Map<String, dynamic>> mergeQueue = [];
+
+  /// For random generation
+  final Random random = Random();
 
   @override
   void initState() {
@@ -62,14 +79,26 @@ class GameScreenState extends State<GameScreen>
       duration: const Duration(milliseconds: 200),
       vsync: this,
     );
-    _slideAnimation = Tween<Offset>(
-      begin: Offset.zero,
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeInOut,
-    ));
+
+    // Listen for animation completion
+    _controller.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        _onAnimationComplete();
+      }
+    });
+
     _initializeGame();
+  }
+
+  void _initializeGame() {
+    final gs = currentGridSize;
+    grid = List.generate(gs, (_) => List.filled(gs, null));
+    obstacles = List.generate(gs, (_) => List.filled(gs, false));
+    isMoving = List.generate(gs, (_) => List.filled(gs, false));
+    startPositions = List.generate(gs, (_) => List.filled(gs, Offset.zero));
+    endPositions = List.generate(gs, (_) => List.filled(gs, Offset.zero));
+    moveCount = 0;
+    _generateSolvableLevel();
   }
 
   @override
@@ -78,79 +107,105 @@ class GameScreenState extends State<GameScreen>
     super.dispose();
   }
 
-  void _initializeGame() {
-    grid = List.generate(gridSize, (_) => List.filled(gridSize, null));
-    obstacles = List.generate(gridSize, (_) => List.filled(gridSize, false));
-    isMoving = List.generate(gridSize, (_) => List.filled(gridSize, false));
-    moveDistances = List.generate(
-      gridSize,
-      (_) => List.filled(gridSize, Offset.zero),
-    );
-    moveCount = 0;
-    _generateSolvableLevel();
-  }
-
   void _generateSolvableLevel() {
     // Clear any existing data
-    grid = List.generate(gridSize, (_) => List.filled(gridSize, null));
-    obstacles = List.generate(gridSize, (_) => List.filled(gridSize, false));
+    grid = List.generate(
+        currentGridSize, (_) => List.filled(currentGridSize, null));
+    obstacles = List.generate(
+        currentGridSize, (_) => List.filled(currentGridSize, false));
 
-    // First place obstacles (max 2 to ensure solvability)
-    int maxObstacles = 2;
-    int obstacleCount = 0;
-    while (obstacleCount < maxObstacles) {
-      int r = random.nextInt(gridSize);
-      int c = random.nextInt(gridSize);
-      // Don't place obstacles in corners or adjacent cells
-      if (!obstacles[r][c] && !_isCorner(r, c) && !_hasAdjacentObstacle(r, c)) {
-        obstacles[r][c] = true;
-        obstacleCount++;
+    // Calculate difficulty parameters based on level
+    int numObstacles = min(1 + (currentLevel ~/ 3), currentGridSize - 1);
+    int numCubePairs = min(2 + (currentLevel ~/ 2), 4);
+    List<int> possibleValues = _getPossibleValuesForLevel();
+
+    // Place obstacles strategically
+    _placeObstacles(numObstacles);
+
+    // Place cube pairs
+    for (int i = 0; i < numCubePairs; i++) {
+      int value = possibleValues[random.nextInt(possibleValues.length)];
+      if (!_placeRandomPair(value)) {
+        // If we can't place a pair, break to avoid infinite loop
+        break;
       }
     }
 
-    // Place exactly 4 cubes with value 2
-    for (int i = 0; i < 2; i++) {
-      _placeRandomPair(2);
+    // Ensure the level is solvable
+    if (!_isLevelSolvable()) {
+      // If not solvable, try again with simpler parameters
+      currentLevel = max(1, currentLevel - 1);
+      _generateSolvableLevel();
+      return;
     }
 
     setState(() {});
   }
 
-  bool _isCorner(int row, int col) {
-    return (row == 0 || row == gridSize - 1) &&
-        (col == 0 || col == gridSize - 1);
+  List<int> _getPossibleValuesForLevel() {
+    List<int> values = [2];
+
+    // Add higher values as level increases
+    if (currentLevel > 3) values.add(4);
+    if (currentLevel > 6) values.add(8);
+
+    // Add more 2s for balance
+    int numTwos = max(1, 4 - values.length);
+    values.addAll(List.filled(numTwos, 2));
+
+    return values;
   }
 
-  bool _hasAdjacentObstacle(int row, int col) {
-    for (var adj in [
-      [-1, 0],
-      [1, 0],
-      [0, -1],
-      [0, 1]
-    ]) {
-      int newRow = row + adj[0];
-      int newCol = col + adj[1];
-      if (newRow >= 0 &&
-          newRow < gridSize &&
-          newCol >= 0 &&
-          newCol < gridSize) {
-        if (obstacles[newRow][newCol]) return true;
+  void _placeObstacles(int count) {
+    // Define possible patterns based on level
+    List<List<Point<int>>> patterns = _getObstaclePatterns();
+
+    if (currentLevel > 5 && patterns.isNotEmpty) {
+      // Use patterns for higher levels
+      List<Point<int>> pattern = patterns[random.nextInt(patterns.length)];
+      for (var point in pattern) {
+        if (count <= 0) break;
+        obstacles[point.x][point.y] = true;
+        count--;
       }
     }
-    return false;
+
+    // Fill remaining obstacles randomly
+    while (count > 0) {
+      int r = random.nextInt(currentGridSize);
+      int c = random.nextInt(currentGridSize);
+      if (!obstacles[r][c] && !_isCorner(r, c) && !_hasAdjacentObstacle(r, c)) {
+        obstacles[r][c] = true;
+        count--;
+      }
+    }
   }
 
-  void _placeRandomPair(int value) {
+  List<List<Point<int>>> _getObstaclePatterns() {
+    // Define interesting obstacle patterns
+    return [
+      // L shape
+      [Point(1, 1), Point(1, 2), Point(2, 1)],
+      // Diagonal
+      [Point(1, 1), Point(2, 2)],
+      // Center block
+      [Point(1, 1), Point(1, 2), Point(2, 1), Point(2, 2)],
+      // T shape
+      [Point(1, 0), Point(1, 1), Point(1, 2), Point(2, 1)],
+    ];
+  }
+
+  bool _placeRandomPair(int value) {
     List<Point<int>> emptyCells = [];
-    for (int r = 0; r < gridSize; r++) {
-      for (int c = 0; c < gridSize; c++) {
+    for (int r = 0; r < currentGridSize; r++) {
+      for (int c = 0; c < currentGridSize; c++) {
         if (grid[r][c] == null && !obstacles[r][c]) {
           emptyCells.add(Point(r, c));
         }
       }
     }
 
-    if (emptyCells.length < 2) return;
+    if (emptyCells.length < 2) return false;
 
     emptyCells.shuffle(random);
     var pos1 = emptyCells[0];
@@ -158,21 +213,99 @@ class GameScreenState extends State<GameScreen>
 
     grid[pos1.x][pos1.y] = value;
     grid[pos2.x][pos2.y] = value;
+    return true;
+  }
+
+  bool _isLevelSolvable() {
+    // Count total value of all cubes
+    int totalValue = 0;
+    for (var row in grid) {
+      for (var value in row) {
+        if (value != null) totalValue += value;
+      }
+    }
+
+    // Check if we can merge to a single cube
+    if (totalValue.isPowerOfTwo) {
+      // Simulate some basic moves to check if cubes can reach each other
+      return _canCubesReach();
+    }
+    return false;
+  }
+
+  bool _canCubesReach() {
+    // Get all cube positions
+    List<Point<int>> cubePositions = [];
+    for (int r = 0; r < currentGridSize; r++) {
+      for (int c = 0; c < currentGridSize; c++) {
+        if (grid[r][c] != null) {
+          cubePositions.add(Point(r, c));
+        }
+      }
+    }
+
+    // Check if there's a path between each pair of same-valued cubes
+    for (int i = 0; i < cubePositions.length; i++) {
+      for (int j = i + 1; j < cubePositions.length; j++) {
+        var pos1 = cubePositions[i];
+        var pos2 = cubePositions[j];
+        if (grid[pos1.x][pos1.y] == grid[pos2.x][pos2.y]) {
+          if (!_hasPathBetween(pos1, pos2)) {
+            return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  bool _hasPathBetween(Point<int> start, Point<int> end) {
+    // Check if there's a clear path either horizontally or vertically
+    bool horizontalPath = true;
+    bool verticalPath = true;
+
+    // Check horizontal path
+    int minX = min(start.x, end.x);
+    int maxX = max(start.x, end.x);
+    for (int x = minX; x <= maxX; x++) {
+      if (obstacles[x][start.y]) {
+        horizontalPath = false;
+        break;
+      }
+    }
+
+    // Check vertical path
+    int minY = min(start.y, end.y);
+    int maxY = max(start.y, end.y);
+    for (int y = minY; y <= maxY; y++) {
+      if (obstacles[start.x][y]) {
+        verticalPath = false;
+        break;
+      }
+    }
+
+    return horizontalPath || verticalPath;
   }
 
   void _moveCubes(String direction) {
+    if (isAnimating) return; // Prevent new moves while animating
+
     bool moved = false;
     List<List<int?>> oldGrid = List.generate(
-      gridSize,
+      currentGridSize,
       (i) => List.from(grid[i]),
     );
 
+    // Clear any existing merge queue
+    mergeQueue.clear();
+
     // Reset states
-    isMoving = List.generate(gridSize, (_) => List.filled(gridSize, false));
-    moveDistances = List.generate(
-      gridSize,
-      (_) => List.filled(gridSize, Offset.zero),
-    );
+    isMoving = List.generate(
+        currentGridSize, (_) => List.filled(currentGridSize, false));
+    startPositions = List.generate(
+        currentGridSize, (_) => List.filled(currentGridSize, Offset.zero));
+    endPositions = List.generate(
+        currentGridSize, (_) => List.filled(currentGridSize, Offset.zero));
 
     // Calculate base movement unit
     Offset baseMove;
@@ -195,12 +328,12 @@ class GameScreenState extends State<GameScreen>
 
     // Store original grid for calculating distances
     List<List<int?>> originalGrid = List.generate(
-      gridSize,
+      currentGridSize,
       (i) => List.from(grid[i]),
     );
 
     // Move cubes
-    for (int i = 0; i < gridSize; i++) {
+    for (int i = 0; i < currentGridSize; i++) {
       List<int?> line = _getLine(i, direction);
       List<bool> obstacleLine = _getObstacleLine(i, direction);
       List<int?> newLine = _moveAndMergeLine(line, obstacleLine);
@@ -208,8 +341,8 @@ class GameScreenState extends State<GameScreen>
     }
 
     // Calculate movement distances and mark moving cells
-    for (int r = 0; r < gridSize; r++) {
-      for (int c = 0; c < gridSize; c++) {
+    for (int r = 0; r < currentGridSize; r++) {
+      for (int c = 0; c < currentGridSize; c++) {
         if (grid[r][c] != oldGrid[r][c]) {
           moved = true;
           if (grid[r][c] != null) {
@@ -219,13 +352,14 @@ class GameScreenState extends State<GameScreen>
             int cells = 0;
             switch (direction) {
               case "left":
-                for (int x = c + 1; x < gridSize; x++) {
+                for (int x = c + 1; x < currentGridSize; x++) {
                   if (originalGrid[r][x] == grid[r][c]) {
                     cells = x - c;
                     break;
                   }
                 }
-                moveDistances[r][c] = baseMove * cells.toDouble();
+                startPositions[r][c] = baseMove * cells.toDouble();
+                endPositions[r][c] = Offset.zero;
                 break;
               case "right":
                 for (int x = c - 1; x >= 0; x--) {
@@ -234,16 +368,18 @@ class GameScreenState extends State<GameScreen>
                     break;
                   }
                 }
-                moveDistances[r][c] = baseMove * cells.toDouble();
+                startPositions[r][c] = baseMove * cells.toDouble();
+                endPositions[r][c] = Offset.zero;
                 break;
               case "up":
-                for (int y = r + 1; y < gridSize; y++) {
+                for (int y = r + 1; y < currentGridSize; y++) {
                   if (originalGrid[y][c] == grid[r][c]) {
                     cells = y - r;
                     break;
                   }
                 }
-                moveDistances[r][c] = baseMove * cells.toDouble();
+                startPositions[r][c] = baseMove * cells.toDouble();
+                endPositions[r][c] = Offset.zero;
                 break;
               case "down":
                 for (int y = r - 1; y >= 0; y--) {
@@ -252,7 +388,8 @@ class GameScreenState extends State<GameScreen>
                     break;
                   }
                 }
-                moveDistances[r][c] = baseMove * cells.toDouble();
+                startPositions[r][c] = baseMove * cells.toDouble();
+                endPositions[r][c] = Offset.zero;
                 break;
             }
           }
@@ -261,32 +398,12 @@ class GameScreenState extends State<GameScreen>
     }
 
     if (moved) {
+      isAnimating = true;
       setState(() {
         moveCount++;
       });
 
-      // Animate the movement
-      for (int r = 0; r < gridSize; r++) {
-        for (int c = 0; c < gridSize; c++) {
-          if (isMoving[r][c]) {
-            _slideAnimation = Tween<Offset>(
-              begin: moveDistances[r][c],
-              end: Offset.zero,
-            ).animate(CurvedAnimation(
-              parent: _controller,
-              curve: Curves.easeInOut,
-            ));
-          }
-        }
-      }
-
-      _controller.forward(from: 0).then((_) {
-        setState(() {
-          isMoving =
-              List.generate(gridSize, (_) => List.filled(gridSize, false));
-        });
-        _checkWinCondition();
-      });
+      _controller.forward(from: 0);
     }
   }
 
@@ -299,7 +416,7 @@ class GameScreenState extends State<GameScreen>
         break;
       case "up":
       case "down":
-        for (int r = 0; r < gridSize; r++) {
+        for (int r = 0; r < currentGridSize; r++) {
           line.add(grid[r][index]);
         }
         break;
@@ -319,7 +436,7 @@ class GameScreenState extends State<GameScreen>
         break;
       case "up":
       case "down":
-        for (int r = 0; r < gridSize; r++) {
+        for (int r = 0; r < currentGridSize; r++) {
           line.add(obstacles[r][index]);
         }
         break;
@@ -341,7 +458,7 @@ class GameScreenState extends State<GameScreen>
         break;
       case "up":
       case "down":
-        for (int r = 0; r < gridSize; r++) {
+        for (int r = 0; r < currentGridSize; r++) {
           grid[r][index] = newLine[r];
         }
         break;
@@ -349,20 +466,80 @@ class GameScreenState extends State<GameScreen>
   }
 
   List<int?> _moveAndMergeLine(List<int?> line, List<bool> obstacleLine) {
-    line = _compressLine(line, obstacleLine);
+    List<int?> result = List<int?>.from(line);
+    result = _compressLine(result, obstacleLine);
 
-    for (int i = 0; i < line.length - 1; i++) {
-      if (line[i] != null &&
-          line[i] == line[i + 1] &&
+    // First pass: identify all possible merges
+    List<Map<String, dynamic>> merges = [];
+    for (int i = 0; i < result.length - 1; i++) {
+      if (result[i] != null &&
+          result[i] == result[i + 1] &&
           !obstacleLine[i] &&
           !obstacleLine[i + 1]) {
-        line[i] = line[i]! * 2;
-        line[i + 1] = null;
-        i++;
+        merges.add({
+          'index': i,
+          'value': result[i]! * 2,
+        });
+        i++; // Skip next cell as it's part of this merge
       }
     }
 
-    return _compressLine(line, obstacleLine);
+    // If we have multiple merges, we need to animate them sequentially
+    if (merges.length > 1) {
+      // Create intermediate states for each merge
+      for (var merge in merges) {
+        int index = merge['index'];
+        int value = merge['value'];
+
+        List<List<int?>> intermediateGrid = List.generate(
+          currentGridSize,
+          (r) => List.from(grid[r]),
+        );
+
+        List<List<bool>> intermediateMoving = List.generate(
+          currentGridSize,
+          (_) => List.filled(currentGridSize, false),
+        );
+
+        List<List<Offset>> intermediateStartPositions = List.generate(
+          currentGridSize,
+          (_) => List.filled(currentGridSize, Offset.zero),
+        );
+
+        List<List<Offset>> intermediateEndPositions = List.generate(
+          currentGridSize,
+          (_) => List.filled(currentGridSize, Offset.zero),
+        );
+
+        // Update the grid for this merge
+        if (result[index] != null) {
+          int row = index ~/ currentGridSize;
+          int col = index % currentGridSize;
+          intermediateGrid[row][col] = value;
+          intermediateGrid[row][col + 1] = null;
+          intermediateMoving[row][col] = true;
+          intermediateStartPositions[row][col] = Offset.zero;
+          intermediateEndPositions[row][col] = const Offset(1, 0);
+        }
+
+        // Add to merge queue
+        mergeQueue.add({
+          'grid': intermediateGrid,
+          'isMoving': intermediateMoving,
+          'startPositions': intermediateStartPositions,
+          'endPositions': intermediateEndPositions,
+        });
+      }
+    }
+
+    // Apply merges to the result
+    for (var merge in merges) {
+      int index = merge['index'];
+      result[index] = merge['value'];
+      result[index + 1] = null;
+    }
+
+    return _compressLine(result, obstacleLine);
   }
 
   List<int?> _compressLine(List<int?> line, List<bool> obstacleLine) {
@@ -415,17 +592,15 @@ class GameScreenState extends State<GameScreen>
   }
 
   void _checkWinCondition() {
-    // Count non-null cells (excluding obstacles)
     int cubeCount = 0;
-    for (int r = 0; r < gridSize; r++) {
-      for (int c = 0; c < gridSize; c++) {
+    for (int r = 0; r < currentGridSize; r++) {
+      for (int c = 0; c < currentGridSize; c++) {
         if (grid[r][c] != null) {
           cubeCount++;
         }
       }
     }
 
-    // Win when there's exactly one cube left
     if (cubeCount == 1) {
       int starsEarned = _calculateStars();
       showDialog(
@@ -436,6 +611,7 @@ class GameScreenState extends State<GameScreen>
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              Text("Level $currentLevel Completed!"),
               Text(
                   "You earned $starsEarned star${starsEarned > 1 ? 's' : ''}!"),
               const SizedBox(height: 10),
@@ -456,6 +632,7 @@ class GameScreenState extends State<GameScreen>
               onPressed: () {
                 Navigator.of(context).pop();
                 setState(() {
+                  currentLevel++;
                   _initializeGame();
                 });
               },
@@ -468,8 +645,10 @@ class GameScreenState extends State<GameScreen>
   }
 
   int _calculateStars() {
-    if (moveCount <= 4) return 3;
-    if (moveCount <= 6) return 2;
+    // Make star thresholds more lenient as levels progress
+    int baseThreshold = 4 + (currentLevel ~/ 2);
+    if (moveCount <= baseThreshold) return 3;
+    if (moveCount <= baseThreshold + 2) return 2;
     return 1;
   }
 
@@ -478,6 +657,55 @@ class GameScreenState extends State<GameScreen>
 
     final hue = (value.toDouble() * 25) % 360;
     return HSLColor.fromAHSL(1.0, hue, 0.6, 0.5).toColor();
+  }
+
+  bool _isCorner(int row, int col) {
+    return (row == 0 || row == currentGridSize - 1) &&
+        (col == 0 || col == currentGridSize - 1);
+  }
+
+  bool _hasAdjacentObstacle(int row, int col) {
+    for (var adj in [
+      [-1, 0],
+      [1, 0],
+      [0, -1],
+      [0, 1]
+    ]) {
+      int newRow = row + adj[0];
+      int newCol = col + adj[1];
+      if (newRow >= 0 &&
+          newRow < currentGridSize &&
+          newCol >= 0 &&
+          newCol < currentGridSize) {
+        if (obstacles[newRow][newCol]) return true;
+      }
+    }
+    return false;
+  }
+
+  void _onAnimationComplete() {
+    if (mergeQueue.isNotEmpty) {
+      // Apply the next merge in the queue
+      setState(() {
+        var merge = mergeQueue.removeAt(0);
+        grid = merge['grid'];
+        isMoving = merge['isMoving'];
+        startPositions = merge['startPositions'];
+        endPositions = merge['endPositions'];
+      });
+      _controller.forward(from: 0);
+    } else {
+      setState(() {
+        isAnimating = false;
+        isMoving = List.generate(
+            currentGridSize, (_) => List.filled(currentGridSize, false));
+        startPositions = List.generate(
+            currentGridSize, (_) => List.filled(currentGridSize, Offset.zero));
+        endPositions = List.generate(
+            currentGridSize, (_) => List.filled(currentGridSize, Offset.zero));
+      });
+      _checkWinCondition();
+    }
   }
 
   @override
@@ -504,6 +732,18 @@ class GameScreenState extends State<GameScreen>
       body: SafeArea(
         child: Column(
           children: [
+            // Level display
+            const SizedBox(height: 8),
+            Text(
+              "Level $currentLevel",
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // Moves and cubes counter
             Padding(
               padding: const EdgeInsets.all(16.0),
               child: Row(
@@ -584,16 +824,16 @@ class GameScreenState extends State<GameScreen>
                     padding: const EdgeInsets.all(8.0),
                     child: GridView.builder(
                       physics: const NeverScrollableScrollPhysics(),
-                      itemCount: gridSize * gridSize,
+                      itemCount: currentGridSize * currentGridSize,
                       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: gridSize,
+                        crossAxisCount: currentGridSize,
                         childAspectRatio: 1,
                         crossAxisSpacing: 4,
                         mainAxisSpacing: 4,
                       ),
                       itemBuilder: (context, index) {
-                        int row = index ~/ gridSize;
-                        int col = index % gridSize;
+                        int row = index ~/ currentGridSize;
+                        int col = index % currentGridSize;
                         bool isObstacle = obstacles[row][col];
                         int? value = grid[row][col];
                         bool shouldAnimate = isMoving[row][col];
@@ -628,7 +868,13 @@ class GameScreenState extends State<GameScreen>
 
                         return shouldAnimate
                             ? SlideTransition(
-                                position: _slideAnimation,
+                                position: Tween<Offset>(
+                                  begin: startPositions[row][col],
+                                  end: endPositions[row][col],
+                                ).animate(CurvedAnimation(
+                                  parent: _controller,
+                                  curve: Curves.easeInOut,
+                                )),
                                 child: cellContent,
                               )
                             : cellContent;
