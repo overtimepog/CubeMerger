@@ -6,6 +6,7 @@ class Cube {
   final bool isMoving;
   final bool isMerging;
   final bool isNew;
+  final bool isOutOfShape;
   final Offset position;
   final Offset startPosition;
   final Offset endPosition;
@@ -18,6 +19,7 @@ class Cube {
     this.isMoving = false,
     this.isMerging = false,
     this.isNew = false,
+    this.isOutOfShape = false,
     this.position = Offset.zero,
     this.startPosition = Offset.zero,
     this.endPosition = Offset.zero,
@@ -31,6 +33,7 @@ class Cube {
     bool? isMoving,
     bool? isMerging,
     bool? isNew,
+    bool? isOutOfShape,
     Offset? position,
     Offset? startPosition,
     Offset? endPosition,
@@ -43,6 +46,7 @@ class Cube {
       isMoving: isMoving ?? this.isMoving,
       isMerging: isMerging ?? this.isMerging,
       isNew: isNew ?? this.isNew,
+      isOutOfShape: isOutOfShape ?? this.isOutOfShape,
       position: position ?? this.position,
       startPosition: startPosition ?? this.startPosition,
       endPosition: endPosition ?? this.endPosition,
@@ -52,6 +56,7 @@ class Cube {
   }
 
   Color getColor() {
+    if (isOutOfShape) return Colors.transparent;
     if (isObstacle) return Colors.black87;
     if (value == null) return Colors.grey[300]!;
 
@@ -59,6 +64,6 @@ class Cube {
     return HSLColor.fromAHSL(1.0, hue, 0.6, 0.5).toColor();
   }
 
-  bool get isEmpty => value == null && !isObstacle;
-  bool get canMerge => value != null && !isObstacle;
+  bool get isEmpty => value == null && !isObstacle && !isOutOfShape;
+  bool get canMerge => value != null && !isObstacle && !isOutOfShape;
 }

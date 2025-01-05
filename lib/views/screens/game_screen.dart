@@ -2,9 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../viewmodels/game_viewmodel.dart';
 import '../widgets/cube_grid.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../services/level_service.dart';
+import '../../models/level.dart';
 
 class GameScreen extends StatefulWidget {
-  const GameScreen({super.key});
+  final int initialLevel;
+
+  const GameScreen({
+    super.key,
+    required this.initialLevel,
+  });
 
   @override
   State<GameScreen> createState() => _GameScreenState();
@@ -13,6 +21,7 @@ class GameScreen extends StatefulWidget {
 class _GameScreenState extends State<GameScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  late final LevelService _levelService;
 
   @override
   void initState() {
@@ -21,6 +30,8 @@ class _GameScreenState extends State<GameScreen>
       duration: const Duration(milliseconds: 300),
       vsync: this,
     );
+    _levelService =
+        LevelService(Provider.of<SharedPreferences>(context, listen: false));
   }
 
   @override
@@ -32,15 +43,27 @@ class _GameScreenState extends State<GameScreen>
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
-      create: (_) => GameViewModel(controller: _controller),
+      create: (_) => GameViewModel(
+        controller: _controller,
+        levelService: _levelService,
+        initialLevel: Level(number: widget.initialLevel),
+      ),
       child: Scaffold(
         appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.home),
+            onPressed: () =>
+                Navigator.of(context).popUntil((route) => route.isFirst),
+            tooltip: 'Home',
+          ),
           title: const Text("Cubes Control"),
           actions: [
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: () => context.read<GameViewModel>().restartLevel(),
-              tooltip: 'Restart Level',
+            Consumer<GameViewModel>(
+              builder: (context, viewModel, _) => IconButton(
+                icon: const Icon(Icons.refresh),
+                onPressed: () => viewModel.restartLevel(),
+                tooltip: 'Reset Level',
+              ),
             ),
           ],
         ),

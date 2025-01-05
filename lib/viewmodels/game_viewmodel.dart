@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/cube.dart';
 import '../models/grid.dart';
 import '../models/level.dart';
+import '../services/level_service.dart';
 import 'dart:collection';
 
 class GameViewModel extends ChangeNotifier {
@@ -10,12 +11,15 @@ class GameViewModel extends ChangeNotifier {
   Grid _grid;
   final AnimationController animationController;
   final Random _random = Random();
-  List<Map<String, dynamic>> _mergeQueue = [];
+  final List<Map<String, dynamic>> _mergeQueue = [];
+  final LevelService _levelService;
 
   GameViewModel({
     required AnimationController controller,
+    required LevelService levelService,
     Level? initialLevel,
   })  : _level = initialLevel ?? Level(number: 1),
+        _levelService = levelService,
         _grid = Grid.empty(_calculateGridSize(1)),
         animationController = controller {
     _initializeLevel();
@@ -40,7 +44,16 @@ class GameViewModel extends ChangeNotifier {
     return 5;
   }
 
-  void _initializeLevel() {
+  void _initializeLevel() async {
+    // Try to load level from JSON
+    final loadedGrid = await _levelService.loadLevel(_level.number);
+    if (loadedGrid != null) {
+      _grid = loadedGrid;
+      notifyListeners();
+      return;
+    }
+
+    // Fallback to generating a level if not found in JSON
     final size = _calculateGridSize(_level.number);
     _grid = Grid.empty(size);
     _generateSolvableLevel();
@@ -208,11 +221,9 @@ class GameViewModel extends ChangeNotifier {
     if (positions.length <= 1) return true;
 
     // Try to find at least one mergeable pair
-    bool foundMergeablePair = false;
     for (int i = 0; i < positions.length; i++) {
       for (int j = i + 1; j < positions.length; j++) {
         if (_hasPathBetween(positions[i], positions[j])) {
-          foundMergeablePair = true;
           // Create new group without the merged pair
           var remainingPositions = positions.toList()
             ..removeAt(j)
@@ -442,18 +453,27 @@ class GameViewModel extends ChangeNotifier {
 
       if (hasWon) {
         _level = _level.copyWith(number: _level.number + 1);
+        _levelService.saveLevel(_level.number);
         _initializeLevel();
       }
     }
   }
 
-  void restartLevel() {
+  void restartLevel() async {
+    final loadedGrid = await _levelService.loadLevel(_level.number);
+    if (loadedGrid != null) {
+      _grid = loadedGrid;
+      notifyListeners();
+    }
+  }
+
+  void resetLevel(int initialLevelNumber) {
+    _level = Level(number: initialLevelNumber);
     _initializeLevel();
   }
 
   @override
   void dispose() {
-    animationController.dispose();
     super.dispose();
   }
 }
