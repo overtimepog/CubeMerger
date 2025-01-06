@@ -7,6 +7,110 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from halo import Halo
 import time
 from datetime import datetime, timedelta
+import logging
+from dataclasses import dataclass
+from threading import Lock
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('level_generation.log'),
+        logging.StreamHandler()
+    ]
+)
+
+@dataclass
+class LevelStats:
+    level_number: int
+    attempts: int
+    shape_type: str
+    grid_size: int
+    num_pairs: int
+    generation_time: float
+    success: bool = True
+
+class LevelLogger:
+    def __init__(self):
+        self.lock = Lock()
+        self.stats: Dict[int, LevelStats] = {}
+    
+    def log_level_start(self, level: int, grid_size: int):
+        with self.lock:
+            self.stats[level] = LevelStats(
+                level_number=level,
+                attempts=0,
+                shape_type="",
+                grid_size=grid_size,
+                num_pairs=0,
+                generation_time=0
+            )
+            logging.info(f"Starting generation of level {level} (size: {grid_size}x{grid_size})")
+    
+    def log_attempt(self, level: int, attempt: int, shape_type: str):
+        with self.lock:
+            if level in self.stats:
+                self.stats[level].attempts = attempt
+                self.stats[level].shape_type = shape_type
+                logging.debug(f"Level {level} - Attempt {attempt} with shape: {shape_type}")
+    
+    def log_pairs_placed(self, level: int, num_pairs: int):
+        with self.lock:
+            if level in self.stats:
+                self.stats[level].num_pairs = num_pairs
+                logging.debug(f"Level {level} - Placed {num_pairs} pairs")
+    
+    def log_level_complete(self, level: int, success: bool, time_taken: float):
+        with self.lock:
+            if level in self.stats:
+                stats = self.stats[level]
+                stats.success = success
+                stats.generation_time = time_taken
+                status = "succeeded" if success else "failed"
+                logging.info(
+                    f"Level {level} {status} - "
+                    f"Attempts: {stats.attempts}, "
+                    f"Shape: {stats.shape_type}, "
+                    f"Pairs: {stats.num_pairs}, "
+                    f"Time: {time_taken:.2f}s"
+                )
+    
+    def get_summary(self) -> str:
+        with self.lock:
+            total_levels = len(self.stats)
+            successful = sum(1 for s in self.stats.values() if s.success)
+            total_time = sum(s.generation_time for s in self.stats.values())
+            total_attempts = sum(s.attempts for s in self.stats.values())
+            avg_attempts = total_attempts / total_levels if total_levels > 0 else 0
+            
+            return (
+                f"\nGeneration Summary:\n"
+                f"Total Levels: {total_levels}\n"
+                f"Successful: {successful}\n"
+                f"Failed: {total_levels - successful}\n"
+                f"Total Time: {total_time:.2f}s\n"
+                f"Average Time per Level: {total_time/total_levels:.2f}s\n"
+                f"Average Attempts per Level: {avg_attempts:.1f}\n"
+                f"Most Common Shape: {self._most_common_shape()}\n"
+                f"Average Pairs per Level: {self._average_pairs():.1f}"
+            )
+    
+    def _most_common_shape(self) -> str:
+        if not self.stats:
+            return "N/A"
+        shapes = {}
+        for s in self.stats.values():
+            shapes[s.shape_type] = shapes.get(s.shape_type, 0) + 1
+        return max(shapes.items(), key=lambda x: x[1])[0]
+    
+    def _average_pairs(self) -> float:
+        if not self.stats:
+            return 0.0
+        return sum(s.num_pairs for s in self.stats.values()) / len(self.stats)
+
+# Global logger instance
+level_logger = LevelLogger()
 
 ############################################################
 # 1. ADVANCED MASK GENERATION (MORE SHAPES)
@@ -112,18 +216,18 @@ def create_shape_mask(size: int) -> List[List[bool]]:
     shape_type = random.choice(shapes)
     
     if shape_type == "noise":
-        return generate_noise_mask(size, fill_prob=0.45, smoothing_iterations=3)
+        return generate_noise_mask(size, fill_prob=0.45, smoothing_iterations=3), shape_type
     elif shape_type == "walk":
-        return generate_random_walk_mask(size)
+        return generate_random_walk_mask(size), shape_type
     elif shape_type == "diamond":
-        return generate_diamond_mask(size)
+        return generate_diamond_mask(size), shape_type
     elif shape_type == "circle":
-        return generate_circle_mask(size)
+        return generate_circle_mask(size), shape_type
     elif shape_type == "cross":
-        return generate_cross_mask(size)
+        return generate_cross_mask(size), shape_type
     else:
         # fallback: full square
-        return [[True]*size for _ in range(size)]
+        return [[True]*size for _ in range(size)], "square"
 
 ############################################################
 # 2. OBSTACLES & PAIR PLACEMENT
@@ -289,12 +393,15 @@ def generate_level(level_number: int, max_tries: int = 30) -> List[List[str]]:
     - If puzzle_solvable => done. Otherwise, retry up to max_tries.
     Returns a 2D list of strings representing the puzzle.
     """
+    start_time = time.time()
     size = get_grid_size(level_number)
     possible_values = get_possible_values(level_number)
+    level_logger.log_level_start(level_number, size)
     
     for attempt in range(1, max_tries + 1):
         # 1) Generate shape mask
-        mask = create_shape_mask(size)
+        mask, shape_type = create_shape_mask(size)
+        level_logger.log_attempt(level_number, attempt, shape_type)
         
         # 2) Build initial grid
         grid = []
@@ -311,7 +418,7 @@ def generate_level(level_number: int, max_tries: int = 30) -> List[List[str]]:
         valid_cells = [(x, y) for x in range(size) for y in range(size)
                        if grid[x][y] == ""]
         if len(valid_cells) < 2:
-            # Not enough to place pairs at all
+            logging.debug(f"Level {level_number} - Attempt {attempt}: Not enough valid cells")
             continue
         
         # Just 1 cluster, size 2 obstacles
@@ -327,6 +434,7 @@ def generate_level(level_number: int, max_tries: int = 30) -> List[List[str]]:
         max_pairs = len(available)//2
         desired_pairs = (level_number // 3) + 2
         num_pairs = min(desired_pairs, max_pairs)
+        pairs_placed = 0
         
         for _ in range(num_pairs):
             if len(available) < 2:
@@ -348,16 +456,24 @@ def generate_level(level_number: int, max_tries: int = 30) -> List[List[str]]:
                 p2 = random.choice(valid_seconds)
                 available.remove(p2)
                 grid[p2[0]][p2[1]] = val
+                pairs_placed += 1
             else:
                 # revert if no valid second cell
                 grid[p1[0]][p1[1]] = ""
                 available.append(p1)
         
+        level_logger.log_pairs_placed(level_number, pairs_placed)
+        
         # 5) Check solvability
         if puzzle_solvable(grid):
+            generation_time = time.time() - start_time
+            level_logger.log_level_complete(level_number, True, generation_time)
             return grid
     
     # If we exit the loop, no solvable puzzle found
+    generation_time = time.time() - start_time
+    level_logger.log_level_complete(level_number, False, generation_time)
+    
     fallback = [["X"]*size for _ in range(size)]
     if size >= 2:
         fallback[0][0] = "2"
@@ -409,6 +525,7 @@ def generate_levels(num_levels: int = 100, max_workers: int = None) -> Dict[str,
     
     finally:
         spinner.stop_and_persist(symbol='✓', text=f'Generated {completed} levels in {time.time() - start_time:.1f}s')
+        print(level_logger.get_summary())
     
     return all_levels
 
